@@ -2038,7 +2038,7 @@ if(document.readyState === "complete")
 // - the user clicked on a profile
 // - the ?profile= query parameter specified a valid profile
 // - the ?profile= query parameter was set to "custom" and at least one disk image was given
-function start_emulation(profile, query_args)
+async function start_emulation(profile, query_args)
 {
     $("boot_options").style.display = "none";
 
@@ -2234,7 +2234,28 @@ function start_emulation(profile, query_args)
         {
             settings.cdrom = { buffer: cdrom };
         }
-        const hda = $("hda_image")?.files[0];
+        let remembered_hda = typeof window !== "undefined" ? window.__remembered_hda_file : null;
+        const remembered_hda_handle = typeof window !== "undefined" ? window.__remembered_hda_handle : null;
+
+        if(remembered_hda_handle)
+        {
+            try
+            {
+                const permission = await remembered_hda_handle.queryPermission({ mode: "read" });
+                if(permission === "granted")
+                {
+                    // Always re-read from disk at boot time to get the latest image.
+                    remembered_hda = await remembered_hda_handle.getFile();
+                    window.__remembered_hda_file = remembered_hda;
+                }
+            }
+            catch(e)
+            {
+                // Ignore handle-read failures and continue with selected file fallback.
+            }
+        }
+
+        const hda = $("hda_image")?.files[0] || remembered_hda;
         if(hda)
         {
             settings.hda = { buffer: hda };

@@ -8,8 +8,253 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="192.png">
 
-<script src="build/v86_all.js?98e7110c2"></script>
+<script>var DEBUG = false;</script>
+<script type="module" src="src/browser/main.js"></script>
 <link rel="stylesheet" href="v86.css">
+<style>
+    /* Keep the page simple: hide the large catalog */
+    #filter,
+    #oses {
+        display: none;
+    }
+
+    /* Show only the hard disk picker in setup */
+    #boot_options table tr {
+        display: none;
+    }
+
+    #row_hda_image {
+        display: table-row;
+    }
+
+    #quick_start_hint {
+        margin: 0 0 1rem;
+    }
+
+    #quick_launch_controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin: 0 0 0.75rem;
+    }
+
+    #quick_launch_status {
+        font-size: 0.9rem;
+        opacity: 0.85;
+        margin: 0 0 1rem;
+    }
+</style>
+<script>
+    (function()
+    {
+        const DB_NAME = "v86-launcher";
+        const STORE_NAME = "file-handles";
+        const HANDLE_KEY = "last-hda";
+        let shouldAutoStartFromRememberedImage = false;
+
+        function supportsPersistentFileHandle()
+        {
+            return "showOpenFilePicker" in window && "indexedDB" in window;
+        }
+
+        function openDb()
+        {
+            return new Promise((resolve, reject) =>
+            {
+                const request = indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = () =>
+                {
+                    request.result.createObjectStore(STORE_NAME);
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function getSavedHandle()
+        {
+            const db = await openDb();
+            return await new Promise((resolve, reject) =>
+            {
+                const tx = db.transaction(STORE_NAME, "readonly");
+                const store = tx.objectStore(STORE_NAME);
+                const req = store.get(HANDLE_KEY);
+                req.onsuccess = () => resolve(req.result || null);
+                req.onerror = () => reject(req.error);
+            });
+        }
+
+        async function setSavedHandle(handle)
+        {
+            const db = await openDb();
+            return await new Promise((resolve, reject) =>
+            {
+                const tx = db.transaction(STORE_NAME, "readwrite");
+                const store = tx.objectStore(STORE_NAME);
+                const req = store.put(handle, HANDLE_KEY);
+                req.onsuccess = () => resolve();
+                req.onerror = () => reject(req.error);
+            });
+        }
+
+        async function clearSavedHandle()
+        {
+            const db = await openDb();
+            return await new Promise((resolve, reject) =>
+            {
+                const tx = db.transaction(STORE_NAME, "readwrite");
+                const store = tx.objectStore(STORE_NAME);
+                const req = store.delete(HANDLE_KEY);
+                req.onsuccess = () => resolve();
+                req.onerror = () => reject(req.error);
+            });
+        }
+
+        async function ensureReadable(handle, mayPrompt)
+        {
+            if(!handle) return false;
+            const opts = { mode: "read" };
+            const current = await handle.queryPermission(opts);
+
+            if(current === "granted") return true;
+            if(!mayPrompt) return false;
+
+            const asked = await handle.requestPermission(opts);
+            return asked === "granted";
+        }
+
+        function setInputFileFromHandle(fileInput, file)
+        {
+            if(!window.DataTransfer) return false;
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            fileInput.files = dt.files;
+            fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+            return true;
+        }
+
+        function setStatus(text)
+        {
+            const status = document.getElementById("quick_launch_status");
+            if(status) status.textContent = text;
+        }
+
+        async function loadHandleIntoPicker(handle, mayPrompt)
+        {
+            const fileInput = document.getElementById("hda_image");
+            if(!fileInput || !handle) return false;
+
+            const ok = await ensureReadable(handle, mayPrompt);
+            if(!ok) return false;
+
+            window.__remembered_hda_handle = handle;
+            const file = await handle.getFile();
+            // Keep a direct reference so startup can use this file even if
+            // the browser doesn't allow assigning to input.files.
+            window.__remembered_hda_file = file;
+            const assigned = setInputFileFromHandle(fileInput, file);
+            if(!assigned)
+            {
+                setStatus("Loaded last image: " + file.name + " (auto-start ready)");
+                return true;
+            }
+
+            setStatus("Loaded last image: " + file.name + " (freshly read from disk)");
+            return true;
+        }
+
+        async function choosePersistentImage()
+        {
+            try
+            {
+                const handles = await window.showOpenFilePicker({
+                    multiple: false,
+                    types: [{
+                        description: "Disk images",
+                        accept: {
+                            "application/octet-stream": [".img", ".bin", ".iso", ".raw", ".vhd", ".vmdk"],
+                        },
+                    }],
+                    excludeAcceptAllOption: false,
+                });
+
+                const handle = handles && handles[0];
+                if(!handle) return;
+
+                await setSavedHandle(handle);
+                await loadHandleIntoPicker(handle, true);
+            }
+            catch(e)
+            {
+                if(e && e.name !== "AbortError")
+                {
+                    setStatus("Could not remember file automatically. Use regular file picker.");
+                }
+            }
+        }
+
+        async function restoreLastImageOnLoad()
+        {
+            const rememberBtn = document.getElementById("remembered_picker");
+            const clearBtn = document.getElementById("clear_remembered_image");
+
+            if(!supportsPersistentFileHandle())
+            {
+                if(rememberBtn) rememberBtn.style.display = "none";
+                if(clearBtn) clearBtn.style.display = "none";
+                setStatus("This browser uses regular file picker mode.");
+                return;
+            }
+
+            if(rememberBtn)
+            {
+                rememberBtn.addEventListener("click", event =>
+                {
+                    event.preventDefault();
+                    choosePersistentImage();
+                });
+            }
+
+            if(clearBtn)
+            {
+                clearBtn.addEventListener("click", async event =>
+                {
+                    event.preventDefault();
+                    await clearSavedHandle();
+                    window.__remembered_hda_handle = null;
+                    window.__remembered_hda_file = null;
+                    setStatus("Cleared remembered image. Pick a file to continue.");
+                });
+            }
+
+            const handle = await getSavedHandle();
+            if(!handle)
+            {
+                setStatus("Pick an image, or use 'Choose + Remember Last Image'.");
+                return;
+            }
+
+            const loaded = await loadHandleIntoPicker(handle, false);
+            if(!loaded)
+            {
+                setStatus("Last image found. Click 'Choose + Remember Last Image' to re-authorize.");
+            }
+            else
+            {
+                shouldAutoStartFromRememberedImage = true;
+            }
+        }
+
+        window.addEventListener("load", () =>
+        {
+            if(!shouldAutoStartFromRememberedImage) return;
+            const start = document.getElementById("start_emulation");
+            if(start) start.click();
+        });
+
+        document.addEventListener("DOMContentLoaded", restoreLastImageOnLoad);
+    })();
+</script>
 
 <div>
     <div id="boot_options">
@@ -193,7 +438,7 @@
                 <td><input type="file" id="fdb_image"> or <a id="fdb_toggle_empty_disk">create empty floppy disk</a><br></td>
             </tr>
 
-            <tr>
+            <tr id="row_hda_image">
                 <td><label for="hda_image">Hard disk image</label></td>
                 <td><input type="file" id="hda_image"> or <a id="hda_toggle_empty_disk">create empty hard disk</a><br></td>
             </tr>
@@ -315,6 +560,12 @@
         </table>
 
         <br>
+        <p id="quick_start_hint">Pick your OS disk image, then click Start Emulation.</p>
+        <div id="quick_launch_controls">
+            <button id="remembered_picker">Choose + Remember Last Image</button>
+            <button id="clear_remembered_image">Forget Remembered Image</button>
+        </div>
+        <p id="quick_launch_status">Preparing launcher...</p>
         <button id="start_emulation">Start Emulation</button>
     </div>
 
